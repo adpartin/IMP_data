@@ -479,10 +479,12 @@ def run(args):
     os.makedirs(outsplit, exist_ok=True)
     os.makedirs(outsplit_sorted, exist_ok=True)
 
+    get_val_set = True
+
     np.random.seed(0)
     idx_vec = np.random.permutation(data.shape[0])
 
-    # import ipdb; ipdb.set_trace(context=5)
+    import ipdb; ipdb.set_trace(context=5)
     from sklearn.model_selection import KFold
     splitter = KFold(n_splits=10, shuffle=False, random_state=None)
     # Split data (D) into tr (T0) and te (E)
@@ -498,13 +500,32 @@ def run(args):
         te_dct[i] = te_id
         # tr_df = data.loc[idx_vec[tr_id]]
         # te_df = data.loc[idx_vec[te_id]]
-    
+
+        if get_val_set:
+            tr_size = len(tr_id) - len(te_id)
+            vl_id = tr_id[tr_size:]
+            tr_id = tr_id[:tr_size]
+            assert len(tr_id) + len(vl_id) + len(te_id) == len(idx_vec), "Size do not match after splitting."
+        
+            # Make sure that indices do not overlap
+            assert len( set(tr_id).intersection(set(vl_id)) ) == 0, 'Overlapping indices btw tr and vl'
+            assert len( set(tr_id).intersection(set(te_id)) ) == 0, 'Overlapping indices btw tr and te'
+            assert len( set(vl_id).intersection(set(te_id)) ) == 0, 'Overlapping indices btw tr and vl'
+            
+            # Print split ratios
+            print_fn('Train samples {} ({:.2f}%)'.format( len(tr_id), 100*len(tr_id)/data.shape[0] ))
+            print_fn('Val   samples {} ({:.2f}%)'.format( len(vl_id), 100*len(vl_id)/data.shape[0] ))
+            print_fn('Test  samples {} ({:.2f}%)'.format( len(te_id), 100*len(te_id)/data.shape[0] ))
+
         # digits = len(str(n_splits))
         seed_str = str(i) # f"{seed}".zfill(digits)
         output = 'split_' + seed_str 
         
         np.savetxt( outsplit/f'{output}_tr_id', tr_id.reshape(-1,1), fmt='%d', delimiter='', newline='\n' )
         np.savetxt( outsplit/f'{output}_te_id', te_id.reshape(-1,1), fmt='%d', delimiter='', newline='\n' )
+
+        if get_val_set:
+            np.savetxt( outsplit/f'{output}_vl_id', vl_id.reshape(-1,1), fmt='%d', delimiter='', newline='\n' )
 
         # Load ids and test consistency
         with open(outsplit/f'{output}_tr_id') as f:
@@ -514,8 +535,16 @@ def run(args):
         assert sum(t1 == tr_id) == len(tr_id), "Number of ids missmatch."
         assert sum(t2 == te_id) == len(te_id), "Number of ids missmatch."
 
+        if get_val_set:
+            with open(outsplit/f'{output}_vl_id') as f:
+                t3 = [int(line.rstrip()) for line in f]
+            assert sum(t3 == vl_id) == len(vl_id), "Number of ids missmatch."
+
         np.savetxt( outsplit_sorted/f'{output}_tr_id', sorted(tr_id), fmt='%d', delimiter='', newline='\n' )
         np.savetxt( outsplit_sorted/f'{output}_te_id', sorted(te_id), fmt='%d', delimiter='', newline='\n' )
+
+        if get_val_set:
+            np.savetxt( outsplit_sorted/f'{output}_vl_id', sorted(vl_id), fmt='%d', delimiter='', newline='\n' )
 
     print_fn('\nDone with splits.')
 

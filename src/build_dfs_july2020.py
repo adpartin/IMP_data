@@ -9,6 +9,7 @@ import os
 import sys
 from pathlib import Path
 import argparse
+import json
 from time import time
 from pprint import pformat
 
@@ -38,6 +39,10 @@ filepath = Path(__file__).resolve().parent
 na_values = ['na', '-', '']
 fea_prfx_dct = {'ge': 'ge_', 'cnv': 'cnv_', 'mu': 'mu_', 'snp': 'snp_',
                 'mordred': 'mordred_', 'dragon': 'dragon_', 'fng': 'fng_'}
+# Rename columns that contain cancer IDs and drug IDs
+canc_col_name = "CancID"
+drug_col_name = "DrugID"
+rename_id_col_names = {"CELL": canc_col_name, "DRUG": drug_col_name}
 
 
 def create_basename(args):
@@ -81,7 +86,10 @@ def read_df(fpath, sep="\t"):
 
 
 def load_rsp(fpath, src=None, r2fit_th=None, print_fn=print):
-    """ Load drug response data. """
+    """ Load drug response data.
+    src : extract specific data sources (i.e., studies)
+    r2fit_th : threshold used to filter out samples with low r2 of the dose-response curve fit
+    """
     rsp = read_df(fpath)
     if "STUDY" in rsp.columns:
         rsp.drop(columns="STUDY", inplace=True)  # gives error when saves in 'parquet' format
@@ -120,6 +128,8 @@ def load_rsp(fpath, src=None, r2fit_th=None, print_fn=print):
         print_fn('\nExtract specific sources.')
         rsp = rsp[rsp['SOURCE'].isin(src)].reset_index(drop=True)
 
+    # Create a binary label from AUC
+    # TODO: there are better ways. E.g., per-drug thersholds)
     rsp['AUC_bin'] = rsp['AUC'].map(lambda x: 0 if x > 0.5 else 1)
     rsp.replace([np.inf, -np.inf], value=np.nan, inplace=True)
 
@@ -294,6 +304,24 @@ def parse_args(args):
                         choices=['AUC'],
                         help='Name of target variable (default: AUC).')
 
+    # Learning curve
+    parser.add_argument('--lc_sizes',
+                        type=int,
+                        default=7,
+                        help="Number of sizes in the learning curve (used only if the lc_step_scale is 'linear')(default: None).")
+    parser.add_argument('--min_size',
+                        type=int,
+                        default=128,
+                        help="Min size value in the case when lc_step_scale is 'log2' or 'log10'")
+    parser.add_argument('--max_size',
+                        type=int,
+                        default=None,
+                        help="Max size value in the case when lc_step_scale is 'log2' or 'log10'")
+    parser.add_argument('--lc_step_scale',
+                        type=str,
+                        default="log2",
+                        help="specifies how to generate the size values. Available values: 'linear', 'log2', 'log10'.")
+
     args = parser.parse_args(args)
     return args
 
@@ -304,6 +332,18 @@ def run(args):
     rsp_cols = ['AUC', 'AUC1', 'EC50', 'EC50se', 'R2fit',
                 'Einf', 'IC50', 'HS', 'AAC1', 'DSS1']
     outdir = create_outdir(args.gout, args)
+    y_outdir = outdir/"y_data"
+    x_outdir = outdir/"x_data"
+    split_outdir = outdir/"splits"
+    split_sorted_outdir = outdir/"splits_sorted"
+    lc_split_outdir = outdir/"lc_splits"
+    misc_outdir = outdir/"misc_data"
+    os.makedirs(y_outdir, exist_ok=True)
+    os.makedirs(x_outdir, exist_ok=True)
+    os.makedirs(split_outdir, exist_ok=True)
+    os.makedirs(split_sorted_outdir, exist_ok=True)
+    os.makedirs(lc_split_outdir, exist_ok=True)
+    os.makedirs(misc_outdir, exist_ok=True)
 
     # -----------------------------------------------
     #     Logger
@@ -313,6 +353,9 @@ def run(args):
     print_fn(f'File path: {filepath}')
     print_fn(f'\n{pformat(vars(args))}')
     dump_dict(vars(args), outpath=outdir/'gen.df.args')
+    json_object = json.dumps(vars(args), indent=4)
+    with open(outdir/"args.json", "w") as outfile:
+        outfile.write(json_object)
 
     # -----------------------------------------------
     #     Load response data and features
@@ -320,39 +363,45 @@ def run(args):
     # import ipdb; ipdb.set_trace(context=5)
 
     # --------
-    # Response
+    # Y data - drug response
     # --------
     rsp = load_rsp(args.rsp_path, src=args.src, r2fit_th=args.r2fit_th,
                    print_fn=print_fn).reset_index(drop=True)
+    rsp = rsp.rename(columns=rename_id_col_names)
     # Save rsp df
-    rsp = rsp.rename(columns={"CELL": "CancID", "DRUG": "DrugID"})
-    rsp_fname = "_".join(args.src)
-    rsp.to_parquet(outdir/f"rsp_full_{rsp_fname}.parquet", index=False)
-    rsp.to_csv(outdir/f"rsp_full_{rsp_fname}.csv", index=False)
+    # rsp_fname = "_".join(args.src)
+    # rsp.to_parquet(outdir/f"rsp_full_{rsp_fname}.parquet", index=False)
+    # rsp.to_csv(outdir/f"rsp_full_{rsp_fname}.csv", index=False)
+    rsp_fname = "rsp_full"
+    rsp.to_parquet(y_outdir/f"{rsp_fname}.parquet", index=False)
+    rsp.to_csv(y_outdir/f"{rsp_fname}.csv", index=False)
 
     # ---------------
-    # Gene expression
+    # X data - Gene expression
     # ---------------
+    # import ipdb; ipdb.set_trace(context=5)
     ge = load_ge(args.cell_path, impute=False, print_fn=print_fn, float_type=np.float32)
-    ge = ge.rename(columns={"CELL": "CancID"})
-    ge = ge[ge["CancID"].isin(rsp["CancID"].unique())].reset_index(drop=True)
+    # ge = ge.rename(columns={"CELL": "CancID"})
+    ge = ge.rename(columns=rename_id_col_names)
+    ge = ge[ge[canc_col_name].isin(rsp[canc_col_name].unique())].reset_index(drop=True)
 
     # Impute
     if sum(ge.isna().sum() > 0):
         raise NotImplementedError("Need to be implemented here!")
 
-    # ge_fname = "".join(args.cell_fea)
-    ge_fname = "_".join(args.cell_fea + args.src)
-    ge.to_parquet(outdir/f"{ge_fname}.parquet", index=False)
-    ge.to_csv(outdir/f"{ge_fname}.csv", index=False)
+    ge_fname = "".join(args.cell_fea)
+    # ge_fname = "_".join(args.cell_fea + args.src)
+    ge.to_parquet(x_outdir/f"{ge_fname}.parquet", index=False)
+    ge.to_csv(x_outdir/f"{ge_fname}.csv", index=False)
 
     # ----------------
-    # Drug descriptors/features
+    # X data - drug descriptors/features
     # ----------------
+    # import ipdb; ipdb.set_trace(context=5)
     def extract_col_subsets(df, fea_id0=5):
-        df_smi = df[["DrugID", "SMILES"]]
+        df_smi = df[[drug_col_name, "SMILES"]]
         df_meta = df.iloc[:, :fea_id0]
-        df_fea = pd.concat([ df["DrugID"], df.iloc[:, fea_id0:] ], axis=1)
+        df_fea = pd.concat([ df[drug_col_name], df.iloc[:, fea_id0:] ], axis=1)
         return df_smi, df_meta, df_fea
 
     fea_id0 = 5
@@ -360,14 +409,14 @@ def run(args):
     # Mordred
     dd = load_dd(args.drug_path, impute=False, dropna_th=args.dropna_th,
                  print_fn=print_fn, float_type=np.float32, src=args.src)
-    ids = dd["DrugID"].isin(rsp["DrugID"].unique())
+    ids = dd[drug_col_name].isin(rsp[drug_col_name].unique())
     dd = dd[ids].reset_index(drop=True)
     dd_smi, dd_meta, dd_fea = extract_col_subsets(dd, fea_id0=fea_id0)
 
     # ECFP2
     data_path = Path(args.drug_path).parent
     ecfp2 = read_df(data_path/"ecfp2_nbits512")
-    ids = ecfp2["DrugID"].isin(rsp["DrugID"].unique())
+    ids = ecfp2[drug_col_name].isin(rsp[drug_col_name].unique())
     ecfp2 = ecfp2[ids].reset_index(drop=True)
     ecfp2_smi, ecfp2_meta, ecfp2_fea = extract_col_subsets(ecfp2, fea_id0=fea_id0)
 
@@ -382,16 +431,19 @@ def run(args):
     # dragon_smi, dragon_meta, dragon_fea = extract_col_subsets(dragon, fea_id0=fea_id0)
 
     # Save
-    mordred_fname = "_".join(args.drug_fea + args.src)
-    dd_fea.to_parquet(outdir/f"{mordred_fname}.parquet", index=False)
-    dd_fea.to_csv(outdir/f"{mordred_fname}.csv", index=False)
+    # mordred_fname = "_".join(args.drug_fea + args.src)
+    mordred_fname = "_".join(args.drug_fea)
+    dd_fea.to_parquet(x_outdir/f"{mordred_fname}.parquet", index=False)
+    dd_fea.to_csv(x_outdir/f"{mordred_fname}.csv", index=False)
 
-    smi_fname = "smiles_" + "_".join(args.src)
-    dd_smi.to_csv(outdir/f"{smi_fname}.csv", index=False)
+    # smi_fname = "smiles_" + "_".join(args.src)
+    smi_fname = "smiles"
+    dd_smi.to_csv(x_outdir/f"{smi_fname}.csv", index=False)
 
-    ecfp2_fname = "ecfp2_" + "_".join(args.src)
-    ecfp2_fea.to_parquet(outdir/f"{ecfp2_fname}.parquet", index=False)
-    ecfp2_fea.to_csv(outdir/f"{ecfp2_fname}.csv", index=False)
+    # ecfp2_fname = "ecfp2_" + "_".join(args.src)
+    ecfp2_fname = "ecfp2"
+    ecfp2_fea.to_parquet(x_outdir/f"{ecfp2_fname}.parquet", index=False)
+    ecfp2_fea.to_csv(x_outdir/f"{ecfp2_fname}.csv", index=False)
 
     # Impute
     if sum(dd.iloc[:, fea_id0:].isna().sum() > 0):
@@ -409,22 +461,22 @@ def run(args):
 
     # Merge with ge
     print_fn('\nMerge with expression (ge).')
-    data = pd.merge(data, ge, on='CancID', how='inner')
-    groupby_src_and_print(data, col1="CancID", col2="DrugID", print_fn=print_fn)
+    data = pd.merge(data, ge, on=canc_col_name, how='inner')
+    groupby_src_and_print(data, col1=canc_col_name, col2=drug_col_name, print_fn=print_fn)
     del ge
 
     # Merge with dd
     print_fn('\nMerge with descriptors (dd).')
-    data = pd.merge(data, dd, on='DrugID', how='inner')
-    groupby_src_and_print(data, col1="CancID", col2="DrugID", print_fn=print_fn)
+    data = pd.merge(data, dd, on=drug_col_name, how='inner')
+    groupby_src_and_print(data, col1=canc_col_name, col2=drug_col_name, print_fn=print_fn)
     del dd
 
     # Save rsp df for samples that have the features
     # import ipdb; ipdb.set_trace()
     rsp_small = data[rsp.columns]
     # groupby_src_and_print(rsp_small, col1="CancID", col2="DrugID", print_fn=print_fn)
-    rsp_small.to_parquet(outdir/f"rsp_{rsp_fname}.parquet", index=False)
-    rsp_small.to_csv(outdir/f"rsp_{rsp_fname}.csv", index=False)
+    rsp_small.to_parquet(y_outdir/f"rsp_with_fea.parquet", index=False)
+    rsp_small.to_csv(y_outdir/f"rsp_with_fea.csv", index=False)
 
     # Sample
     if (args.n_samples is not None):
@@ -446,15 +498,16 @@ def run(args):
             fea_name, len(cols), mem))
 
     # Plot histograms of target variables
-    plot_rsp_dists(data, rsp_cols=rsp_cols, savepath=outdir/'rsp_dists.png')
+    plot_rsp_dists(data, rsp_cols=rsp_cols, savepath=misc_outdir/'rsp_dists.png')
 
     # -----------------------------------------------
     #   Save data
     # -----------------------------------------------
     # Save data
     print_fn('\nSave dataframe.')
-    fname = create_basename(args)
-    fpath = outdir/(fname + '.parquet')
+    # fname = create_basename(args)
+    fname = "df"
+    fpath = misc_outdir/(fname + '.parquet')
     data.to_parquet(fpath)
 
     # Load data
@@ -472,19 +525,14 @@ def run(args):
     # -----------------------------------------------
     #   Data splits
     # -----------------------------------------------
+    # import ipdb; ipdb.set_trace(context=5)
     print_fn('\nGenerate data splits.')
-
-    outsplit = outdir/"splits"
-    outsplit_sorted = outdir/"splits_sorted"
-    os.makedirs(outsplit, exist_ok=True)
-    os.makedirs(outsplit_sorted, exist_ok=True)
 
     get_val_set = True
 
     np.random.seed(0)
     idx_vec = np.random.permutation(data.shape[0])
 
-    import ipdb; ipdb.set_trace(context=5)
     from sklearn.model_selection import KFold
     splitter = KFold(n_splits=10, shuffle=False, random_state=None)
     # Split data (D) into tr (T0) and te (E)
@@ -501,6 +549,7 @@ def run(args):
         # tr_df = data.loc[idx_vec[tr_id]]
         # te_df = data.loc[idx_vec[te_id]]
 
+        # Generate val set ids from train set ids
         if get_val_set:
             tr_size = len(tr_id) - len(te_id)
             vl_id = tr_id[tr_size:]
@@ -521,38 +570,95 @@ def run(args):
         seed_str = str(i) # f"{seed}".zfill(digits)
         output = 'split_' + seed_str 
         
-        np.savetxt( outsplit/f'{output}_tr_id', tr_id.reshape(-1,1), fmt='%d', delimiter='', newline='\n' )
-        np.savetxt( outsplit/f'{output}_te_id', te_id.reshape(-1,1), fmt='%d', delimiter='', newline='\n' )
+        np.savetxt( split_outdir/f'{output}_tr_id', tr_id.reshape(-1,1), fmt='%d', delimiter='', newline='\n' )
+        np.savetxt( split_outdir/f'{output}_te_id', te_id.reshape(-1,1), fmt='%d', delimiter='', newline='\n' )
 
         if get_val_set:
-            np.savetxt( outsplit/f'{output}_vl_id', vl_id.reshape(-1,1), fmt='%d', delimiter='', newline='\n' )
+            np.savetxt( split_outdir/f'{output}_vl_id', vl_id.reshape(-1,1), fmt='%d', delimiter='', newline='\n' )
 
         # Load ids and test consistency
-        with open(outsplit/f'{output}_tr_id') as f:
+        with open(split_outdir/f'{output}_tr_id') as f:
             t1 = [int(line.rstrip()) for line in f]
-        with open(outsplit/f'{output}_te_id') as f:
+        with open(split_outdir/f'{output}_te_id') as f:
             t2 = [int(line.rstrip()) for line in f]
         assert sum(t1 == tr_id) == len(tr_id), "Number of ids missmatch."
         assert sum(t2 == te_id) == len(te_id), "Number of ids missmatch."
 
         if get_val_set:
-            with open(outsplit/f'{output}_vl_id') as f:
+            with open(split_outdir/f'{output}_vl_id') as f:
                 t3 = [int(line.rstrip()) for line in f]
             assert sum(t3 == vl_id) == len(vl_id), "Number of ids missmatch."
 
-        np.savetxt( outsplit_sorted/f'{output}_tr_id', sorted(tr_id), fmt='%d', delimiter='', newline='\n' )
-        np.savetxt( outsplit_sorted/f'{output}_te_id', sorted(te_id), fmt='%d', delimiter='', newline='\n' )
+        np.savetxt( split_sorted_outdir/f"{output}_tr_id", sorted(tr_id), fmt="%d", delimiter="", newline="\n" )
+        np.savetxt( split_sorted_outdir/f"{output}_te_id", sorted(te_id), fmt="%d", delimiter="", newline="\n" )
 
         if get_val_set:
-            np.savetxt( outsplit_sorted/f'{output}_vl_id', sorted(vl_id), fmt='%d', delimiter='', newline='\n' )
+            np.savetxt( split_sorted_outdir/f"{output}_vl_id", sorted(vl_id), fmt="%d", delimiter="", newline="\n" )
+
+        # LC data splits
+        np.savetxt( lc_split_outdir/f"{output}_tr_id", sorted(tr_id), fmt="%d", delimiter="", newline="\n" )
+        np.savetxt( lc_split_outdir/f"{output}_vl_id", sorted(vl_id), fmt="%d", delimiter="", newline="\n" )
+        np.savetxt( lc_split_outdir/f"{output}_te_id", sorted(te_id), fmt="%d", delimiter="", newline="\n" )
+
+        # lc_step_scale = "log"
+        # lc_sizes = 7
+        lc_step_scale = args.lc_step_scale
+        lc_sizes = args.lc_sizes
+        assert args.min_size < data.shape[0], "Learning curve min_size must be smaller than the available training set size."
+        min_size = args.min_size
+        if args.max_size is None:
+            max_size = len(tr_id)
+        # from learningcurve.lrn_crv import LearningCurve
+        # lc_obj = LearningCurve(X=None, Y=None, meta=None, **lc_init_args)
+        # pw = np.linspace(0, self.lc_sizes-1, num=self.lc_sizes) / (self.lc_sizes-1)
+        # m = self.min_size * (self.max_size/self.min_size) ** pw
+        # m = np.array( [int(i) for i in m] ) # cast to int
+        pw = np.linspace(0, lc_sizes-1, num=lc_sizes) / (lc_sizes-1)
+        m = min_size * (max_size/min_size) ** pw
+        m = np.array([int(i) for i in m])  # cast to int
+        tr_sizes = m
+
+        # LC subsets
+        ids = tr_id
+        ids = sorted(tr_id)
+        for i, sz in enumerate(tr_sizes):
+            aa = ids[:sz]
+            # aa.to_csv(outdir/f"train_sz_{i+1}.csv", index=False)
+            np.savetxt( lc_split_outdir/f"{output}_tr_sz_{i}_id", sorted(ids), fmt="%d", delimiter="", newline="\n" )
 
     print_fn('\nDone with splits.')
 
 
     # -----------------------------------------------
+    #   LC data splits
+    # -----------------------------------------------
+    # Note! We will create the ids for learning curve from the generated data splits
+    # import ipdb; ipdb.set_trace(context=5)
+    # print_fn('\nGenerate data splits for learning curve.')
+
+    # split_files = list(split_outdir.glob("split_*_id"))
+    # # Iter over split_*_tr_id files
+    # for fname in [f for f in split_files if "tr_" in f.name]:
+    #     # Check that vl and te splits are also available
+    #     split_id = fname.split("_")[1]
+    #     if (f"split_{split_id}_vl_id" not in split_files) and f"split_{split_id}_tr_id" not in split_files:
+    #         continue
+
+    #     # Copy vl and te files to LC folder
+    #     import shutil
+    #     dest = shutil.copyfile(split_outdir/f"split_{split_id}_vl_id", lc_split_outdir/f"split_{split_id}_vl_id")
+    #     dest = shutil.copyfile(split_outdir/f"split_{split_id}_te_id", lc_split_outdir/f"split_{split_id}_te_id")
+
+    #     # Create tr split sizes
+    #     # TODO
+
+
+    # -----------------------------------------------
     #   Train model
     # -----------------------------------------------
+    # import ipdb; ipdb.set_trace(context=5)
     train = False
+    # train = True
 
     if train:
         print_fn('\nTrain model.')

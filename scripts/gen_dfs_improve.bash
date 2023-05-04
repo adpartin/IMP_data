@@ -7,12 +7,6 @@ data_version=July2020
 # rawdir=IMP_data/raw/$data_version
 rawdir=raw/$data_version
 
-## Outdir path
-# outdir=$rawdir/../../ml.dfs/$data_version
-# outdir=$rawdir/../../ml.dfs/$data_version
-# outdir=$rawdir/../../ml.dfs.tr_vl_te/$data_version
-outdir=$rawdir/../../out_data/$data_version
-
 ## Y data (path drug response)
 # rsp_path=$rawdir/combined_single_response_rescaled_agg
 rsp_path=$rawdir/combined_single_response_rescaled_agg.parquet
@@ -31,11 +25,34 @@ drug_path=$rawdir/dd.mordred.csv
 ## Experiment settings
 dropna_th=0.1
 r2fit_th=0.3
+# No of samples
+n_samples=200  # Smaller dataset (sample n samples)
+# n_samples=''  # Smaller dataset (sample n samples)
+
+## Outdir path
+if [ -z "$n_samples" ]
+then
+    echo "n_samples is $n_samples"
+    outdir=$rawdir/../../out_data/$data_version
+else
+    echo "n_samples is $n_samples"
+    lc_min_size=5
+    echo "lc_min_size is $lc_min_size"
+    outdir=$rawdir/../../out_data_sample/$data_version
+fi
+# outdir=$rawdir/../../ml.dfs/$data_version
+# outdir=$rawdir/../../ml.dfs.tr_vl_te/$data_version
+# -----
+# Use this ..
+# outdir=$rawdir/../../out_data/$data_version
+# .. or this
+# outdir=$rawdir/../../out_data_sample/$data_version
+# -----
 
 # ------------------------------------------------------------
-# sources=("ccle" "ctrp" "gcsi" "gdsc1" "gdsc2")
+sources=("ccle" "ctrp" "gcsi" "gdsc1" "gdsc2")
 # sources=("gdsc1" "gdsc2")
-sources=("ccle" "gdsc2")
+# sources=("ccle" "gdsc2")
 # sources=("gdsc1")
 # sources=("gdsc2")
 # sources=("ccle")
@@ -49,6 +66,8 @@ for SOURCE in ${sources[@]}; do
         --drug_path $drug_path \
         --dropna_th $dropna_th \
         --r2fit_th $r2fit_th \
+        --n_samples $n_samples \
+        --lc_min_size $lc_min_size \
         --gout $outdir
 done
 

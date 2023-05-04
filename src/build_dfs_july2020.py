@@ -36,12 +36,29 @@ from ml.data import extract_subset_fea
 filepath = Path(__file__).resolve().parent
 
 # Settings
+metadata = {}
 na_values = ['na', '-', '']
 fea_prfx_dct = {'ge': 'ge_', 'cnv': 'cnv_', 'mu': 'mu_', 'snp': 'snp_',
                 'mordred': 'mordred_', 'dragon': 'dragon_', 'fng': 'fng_'}
-# Rename columns that contain cancer IDs and drug IDs
+# TODO: consider to make this types SimpleNamspace
 canc_col_name = "CancID"
 drug_col_name = "DrugID"
+metadata["CANC_COL_NAME"] = canc_col_name
+metadata["DRUG_COL_NAME"] = drug_col_name
+x_datadir_name = "x_data"
+y_datadir_name = "y_data"
+splits_datadir_name = "splits"
+splits_sorted_datadir_name = "splits_sorted"
+lc_splits_datadir_name = "lc_splits"
+misc_datadir_name = "misc_data"
+metadata["X_DATADIR_NAME"] = x_datadir_name
+metadata["Y_DATADIR_NAME"] = y_datadir_name
+metadata["SPLITS_DATADIR_NAME"] = splits_datadir_name
+metadata["SPLITS_SORTED_DATADIR_NAME"] = splits_sorted_datadir_name
+metadata["LC_SPLITS_DIRNAME"] = lc_splits_datadir_name
+metadata["MISC_DATADIR_NAME"] = misc_datadir_name
+
+# Rename columns that contain cancer IDs and drug IDs
 rename_id_col_names = {"CELL": canc_col_name, "DRUG": drug_col_name}
 
 
@@ -307,13 +324,13 @@ def parse_args(args):
     # Learning curve
     parser.add_argument('--lc_sizes',
                         type=int,
-                        default=7,
+                        default=11,
                         help="Number of sizes in the learning curve (used only if the lc_step_scale is 'linear')(default: None).")
-    parser.add_argument('--min_size',
+    parser.add_argument('--lc_min_size',
                         type=int,
                         default=128,
                         help="Min size value in the case when lc_step_scale is 'log2' or 'log10'")
-    parser.add_argument('--max_size',
+    parser.add_argument('--lc_max_size',
                         type=int,
                         default=None,
                         help="Max size value in the case when lc_step_scale is 'log2' or 'log10'")
@@ -331,13 +348,17 @@ def run(args):
     t0 = time()
     rsp_cols = ['AUC', 'AUC1', 'EC50', 'EC50se', 'R2fit',
                 'Einf', 'IC50', 'HS', 'AAC1', 'DSS1']
+
+    # Create main outdir
     outdir = create_outdir(args.gout, args)
-    y_outdir = outdir/"y_data"
-    x_outdir = outdir/"x_data"
-    split_outdir = outdir/"splits"
-    split_sorted_outdir = outdir/"splits_sorted"
-    lc_split_outdir = outdir/"lc_splits"
-    misc_outdir = outdir/"misc_data"
+    # Define sub-outdirs
+    y_outdir = outdir/y_datadir_name
+    x_outdir = outdir/x_datadir_name
+    split_outdir = outdir/splits_datadir_name
+    split_sorted_outdir = outdir/splits_sorted_datadir_name
+    lc_split_outdir = outdir/lc_splits_datadir_name
+    misc_outdir = outdir/misc_datadir_name
+    # Make outdirs
     os.makedirs(y_outdir, exist_ok=True)
     os.makedirs(x_outdir, exist_ok=True)
     os.makedirs(split_outdir, exist_ok=True)
@@ -390,6 +411,7 @@ def run(args):
         raise NotImplementedError("Need to be implemented here!")
 
     ge_fname = "".join(args.cell_fea)
+    metadata["GE_FNAME"] = ge_fname
     # ge_fname = "_".join(args.cell_fea + args.src)
     ge.to_parquet(x_outdir/f"{ge_fname}.parquet", index=False)
     ge.to_csv(x_outdir/f"{ge_fname}.csv", index=False)
@@ -433,15 +455,18 @@ def run(args):
     # Save
     # mordred_fname = "_".join(args.drug_fea + args.src)
     mordred_fname = "_".join(args.drug_fea)
+    metadata["MORDRED_FNAME"] = mordred_fname
     dd_fea.to_parquet(x_outdir/f"{mordred_fname}.parquet", index=False)
     dd_fea.to_csv(x_outdir/f"{mordred_fname}.csv", index=False)
 
     # smi_fname = "smiles_" + "_".join(args.src)
     smi_fname = "smiles"
+    metadata["SMI_FNAME"] = smi_fname
     dd_smi.to_csv(x_outdir/f"{smi_fname}.csv", index=False)
 
     # ecfp2_fname = "ecfp2_" + "_".join(args.src)
     ecfp2_fname = "ecfp2"
+    metadata["ECFP2_FNAME"] = ecfp2_fname
     ecfp2_fea.to_parquet(x_outdir/f"{ecfp2_fname}.parquet", index=False)
     ecfp2_fea.to_csv(x_outdir/f"{ecfp2_fname}.csv", index=False)
 
@@ -484,7 +509,7 @@ def run(args):
         if args.flatten:
             data = flatten_dist(df=data, n=args.n_samples, score_name=args.trg_name)
         else:
-            if args.n_samaples <= data.shape[0]:
+            if args.n_samples <= data.shape[0]:
                 data = data.sample(n=args.n_samples, replace=False, random_state=0)
         print_fn(f'data.shape {data.shape}\n')
 
@@ -505,6 +530,7 @@ def run(args):
     # -----------------------------------------------
     # Save data
     print_fn('\nSave dataframe.')
+    print_fn("data shape: {}".format(data.shape))
     # fname = create_basename(args)
     fname = "df"
     fpath = misc_outdir/(fname + '.parquet')
@@ -512,6 +538,7 @@ def run(args):
 
     # Load data
     print_fn('Load dataframe.')
+    print_fn("data shape: {}".format(data.shape))
     data_fromfile = pd.read_parquet(fpath)
 
     # Check that the saved data is the same as original one
@@ -559,7 +586,7 @@ def run(args):
             # Make sure that indices do not overlap
             assert len( set(tr_id).intersection(set(vl_id)) ) == 0, 'Overlapping indices btw tr and vl'
             assert len( set(tr_id).intersection(set(te_id)) ) == 0, 'Overlapping indices btw tr and te'
-            assert len( set(vl_id).intersection(set(te_id)) ) == 0, 'Overlapping indices btw tr and vl'
+            assert len( set(vl_id).intersection(set(te_id)) ) == 0, 'Overlapping indices btw vl and te'
             
             # Print split ratios
             print_fn('Train samples {} ({:.2f}%)'.format( len(tr_id), 100*len(tr_id)/data.shape[0] ))
@@ -576,7 +603,7 @@ def run(args):
         if get_val_set:
             np.savetxt( split_outdir/f'{output}_vl_id', vl_id.reshape(-1,1), fmt='%d', delimiter='', newline='\n' )
 
-        # Load ids and test consistency
+        # Load ids and check consistency
         with open(split_outdir/f'{output}_tr_id') as f:
             t1 = [int(line.rstrip()) for line in f]
         with open(split_outdir/f'{output}_te_id') as f:
@@ -595,7 +622,7 @@ def run(args):
         if get_val_set:
             np.savetxt( split_sorted_outdir/f"{output}_vl_id", sorted(vl_id), fmt="%d", delimiter="", newline="\n" )
 
-        # LC data splits
+        ## LC data splits
         np.savetxt( lc_split_outdir/f"{output}_tr_id", sorted(tr_id), fmt="%d", delimiter="", newline="\n" )
         np.savetxt( lc_split_outdir/f"{output}_vl_id", sorted(vl_id), fmt="%d", delimiter="", newline="\n" )
         np.savetxt( lc_split_outdir/f"{output}_te_id", sorted(te_id), fmt="%d", delimiter="", newline="\n" )
@@ -604,27 +631,27 @@ def run(args):
         # lc_sizes = 7
         lc_step_scale = args.lc_step_scale
         lc_sizes = args.lc_sizes
-        assert args.min_size < data.shape[0], "Learning curve min_size must be smaller than the available training set size."
-        min_size = args.min_size
-        if args.max_size is None:
-            max_size = len(tr_id)
+        assert args.lc_min_size < data.shape[0], "Learning curve lc_min_size must be smaller than the available training set size."
+        lc_min_size = args.lc_min_size
+        if args.lc_max_size is None:
+            lc_max_size = len(tr_id)
         # from learningcurve.lrn_crv import LearningCurve
         # lc_obj = LearningCurve(X=None, Y=None, meta=None, **lc_init_args)
         # pw = np.linspace(0, self.lc_sizes-1, num=self.lc_sizes) / (self.lc_sizes-1)
-        # m = self.min_size * (self.max_size/self.min_size) ** pw
+        # m = self.lc_min_size * (self.lc_max_size/self.lc_min_size) ** pw
         # m = np.array( [int(i) for i in m] ) # cast to int
         pw = np.linspace(0, lc_sizes-1, num=lc_sizes) / (lc_sizes-1)
-        m = min_size * (max_size/min_size) ** pw
+        m = lc_min_size * (lc_max_size/lc_min_size) ** pw
         m = np.array([int(i) for i in m])  # cast to int
         tr_sizes = m
 
         # LC subsets
         ids = tr_id
-        ids = sorted(tr_id)
+        # ids = sorted(tr_id)  # TODO: should this be sorted?
         for i, sz in enumerate(tr_sizes):
             aa = ids[:sz]
             # aa.to_csv(outdir/f"train_sz_{i+1}.csv", index=False)
-            np.savetxt( lc_split_outdir/f"{output}_tr_sz_{i}_id", sorted(ids), fmt="%d", delimiter="", newline="\n" )
+            np.savetxt( lc_split_outdir/f"{output}_tr_sz_{i}_id", sorted(aa), fmt="%d", delimiter="", newline="\n" )
 
     print_fn('\nDone with splits.')
 
@@ -722,6 +749,11 @@ def run(args):
 
         print_fn('\nDone with training.')
 
+
+    # Save metadata
+    # json_object = json.dumps(vars(args), indent=4)
+    # with open(outdir/"args.json", "w") as outfile:
+    #     outfile.write(json_object)
 
     # -------------------------------------------------------
     print_fn('\nRuntime: {:.1f} mins'.format((time()-t0)/60))
